@@ -1,0 +1,160 @@
+# Telegram Multiplayer Game Bot
+
+Play **Tic-Tac-Toe**, **Checkers**, and **Connect 4** against another
+player over Telegram, each in your own private chat with the bot.
+Rooms are matched via a 4-digit code (like a private lobby).
+
+---
+
+## 1. Where to put your credentials
+
+**This is the only file you need to edit before running the bot:**
+
+```
+.env.example   →  copy this to a new file named  .env
+```
+
+Open the new `.env` file and replace these three placeholder lines:
+
+```env
+BOT_TOKEN=REPLACE_WITH_YOUR_BOT_TOKEN
+MONGO_URI=REPLACE_WITH_YOUR_MONGODB_URI
+CHANNEL_ID=REPLACE_WITH_YOUR_CHANNEL_ID
+```
+
+with your real values:
+
+| Variable | Where to get it |
+|---|---|
+| `BOT_TOKEN` | Message **@BotFather** on Telegram → `/newbot` (or `/mybots` → your bot → API Token) |
+| `MONGO_URI` | MongoDB Atlas → Database → **Connect** → "Drivers" → copy the connection string (fill in your real password, no `<>`) |
+| `CHANNEL_ID` | See step 2 below |
+| `MONGO_DB_NAME` | Optional — defaults to `game_bot`, only change if you want a specific DB name |
+
+**Never commit `.env` to git or paste it anywhere public** — `.gitignore` already excludes it.
+
+---
+
+## 2. Getting your Telegram Channel ID
+
+1. Create a Telegram channel (or use an existing one) for stats/leaderboard logs.
+2. Add your bot to the channel as an **admin** (needs "Post Messages" permission).
+3. Get the channel's numeric ID — easiest way:
+   - Forward any message from the channel to **@userinfobot** or **@RawDataBot**, or
+   - Temporarily make the channel public, visit `https://t.me/s/yourchannelname`, and use an ID-lookup bot.
+4. The ID will look like `-1001234567890` (negative, starts with `-100`). Put that in `.env` as `CHANNEL_ID`.
+
+---
+
+## 3. Install & run locally
+
+```bash
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env            # then edit .env with your real values
+python3 main.py
+```
+
+If it starts without errors, your bot is now polling Telegram for messages.
+
+---
+
+## 4. Deploying as a Web Service (Render, or similar)
+
+This bot now runs as a **webhook-based web service** — it binds `$PORT`
+immediately and Telegram pushes updates to it, instead of the bot
+polling Telegram. This is the same shape Render (and most PaaS hosts)
+expect from a "Web Service."
+
+1. Push this project to a GitHub repo (make sure `.env` is **not** included — check `.gitignore`).
+2. On Render: **New +** → **Web Service** (not Background Worker).
+3. Connect your repo.
+4. **Build Command:** `pip install -r requirements.txt`
+5. **Start Command:** `python3 main.py`
+6. `runtime.txt` pins Python to `3.11.9` — Render reads this automatically.
+7. Under **Environment**, add `BOT_TOKEN`, `MONGO_URI`, `CHANNEL_ID`, and optionally `MONGO_DB_NAME` — enter real values in Render's dashboard, not in code. You normally do **not** need to set `WEBHOOK_URL` yourself on Render — the bot auto-detects Render's `RENDER_EXTERNAL_URL` and uses that.
+8. Deploy. Check the logs for "Starting in webhook mode" and the registered webhook URL.
+9. `render.yaml` in this project describes the same service if you'd rather use Render's Blueprint (`New + → Blueprint`) instead of clicking through manually.
+
+**Running locally (no public URL)?** Just run `python3 main.py` with
+no `WEBHOOK_URL` set — the bot falls back to long polling automatically,
+which is easier for local development (no tunnel/ngrok needed).
+
+---
+
+## 5. Message reactions
+
+Every general chat message the bot receives (`/start`, `/menu`,
+`/join`, casual text, etc.) automatically gets a native Telegram
+message reaction (the little emoji that pops onto a message — the
+same feature as double-tapping a message in WhatsApp), picked at
+random from a friendly set (👍 ❤️ 🔥 🎉 👏 😍 😎 🤩 👇 ⭐).
+
+This is **skipped while a player is in an active or waiting game
+room** — gameplay itself is entirely inline-button taps, which
+Telegram doesn't support reactions on anyway, but this also covers
+any stray text someone sends while mid-match, so the reaction never
+fires on top of a live game.
+
+The logic lives in `bot/utils/reactions.py` and is wired in as an
+outer middleware in `main.py` (`dp.message.outer_middleware(...)`), so
+it runs before any command/handler decides what to do with the
+message. Reactions are best-effort: if Telegram rejects one (e.g. the
+message is too old, or reactions aren't allowed in that chat), it's
+silently ignored and never breaks the bot's actual reply.
+
+---
+
+## 6. How the bot works
+
+### Commands
+- `/start` — welcome message + game selection menu
+- `/menu` — show the game menu again
+- `/join CODE` (or just sending the 4-digit code on its own) — join a friend's room
+- `/cancel` — cancel/leave your current room
+
+### Game flow
+1. Player A picks a game from the menu → bot creates a room and gives a 4-digit code.
+2. Player A shares that code with Player B (via chat, voice call, whatever).
+3. Player B sends `1234` (or `/join 1234`) to the bot.
+4. Both players get a private-chat message with the game board as inline buttons.
+5. Moves sync in real time between both chats (each tap updates both boards).
+6. On game end, results are saved to MongoDB and posted to your Telegram channel.
+
+### MongoDB collections
+- `users` — every user who has messaged the bot
+- `rooms` — room codes, host/guest, live game state, status (waiting/active/finished)
+- `stats` — per-user win/loss/draw counts, overall and per-game
+
+### Channel posts
+- **Room opened** — posted when a player creates a room
+- **Match result** — posted immediately when a game finishes
+- **Daily leaderboard** — posted once every 24 hours (default: 12:00 UTC, configurable in `bot/utils/scheduler.py` via `DAILY_POST_HOUR_UTC`)
+
+---
+
+## 7. Project structure
+
+```
+main.py                      Entry point — runs as a webhook web service (falls back to polling locally)
+Procfile                     `web: python main.py` — for Render/Heroku-style Procfile deploys
+render.yaml                  One-click Render Blueprint definition
+runtime.txt                  Pins Python version for Render (avoids build failures)
+bot/config.py                Loads .env variables (incl. WEBHOOK_URL / PORT)
+bot/db/                       MongoDB connection + data access (users, rooms, stats)
+bot/games/                    Pure game logic (no Telegram code) — tictactoe, checkers, connect4
+bot/handlers/                 aiogram handlers — menu, join, gameplay (button taps)
+bot/utils/rendering.py        Converts game state into Telegram inline keyboards
+bot/utils/reactions.py        Emoji message-reaction middleware (skipped during active games)
+bot/utils/channel_log.py      Posts match results & leaderboard to your channel
+bot/utils/scheduler.py        Daily leaderboard timer loop
+```
+
+---
+
+## 8. Notes & limitations
+
+- **Checkers** captures are optional (not forced), simplifying the UI — a player may make any legal move, jump or not.
+- Game state lives in MongoDB, so if the bot restarts mid-game, active rooms and boards survive (checkers' "selected piece" UI state does not — it's in-memory only and just resets to "nothing selected," which is harmless).
+- Runs as a **webhook-based web service** by default when a public URL is available (e.g. on Render); falls back to **long polling** automatically for local development with no public URL.
